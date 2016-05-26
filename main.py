@@ -4,12 +4,14 @@ import matplotlib.pyplot as plt
 
 class data_assimilation:
 
-    def __init__(self, f, inflation, J=40, dt=0.05, delta=1e-5):
-        self.J = J
+    def __init__(self, f, inflation, mask=np.ones(40), delta=1e-5, dt=0.05):
+        self.J = 40
         self.dt = dt
         self.f = f
         self.delta = delta
         self.inflation = inflation
+        self.mask = mask
+        self.N = sum([1 for e in mask if e == 1])
 
     def time_evolution(self, x):
         res = runge_kutta(self.f, x, self.dt)
@@ -22,22 +24,37 @@ class data_assimilation:
             e_j = np.zeros(self.J)
             e_j[j] = 1.0
             M_j = (self.time_evolution(x + delta * e_j) - self.time_evolution(x)) / delta
-            # M_j = (self.time_evolution(x + 0.5 * delta * e_j) - self.time_evolution(x - 0.5 * delta * e_j)) / delta
             tmp.append(M_j)
         res = np.dstack(tmp)[0]
         return res
 
+    def H(self, x):
+        res = np.array(x[self.mask == 1])
+        return res
+
+    def H_jacobian(self, x):
+        res = np.zeros((self.N, self.J))
+        i = 0
+        for j, e in enumerate(self.mask):
+            if e == 0:
+                continue
+            res[i, j] = 1.0
+            i += 1
+        return res
+
     def kalman_filter(self, xa, Pa, yo, R):
-        xf = self.time_evolution(xa)
+        xf = self.time_evolution(xa)  # J * 1
 
-        M = self.tangent_liner_model(xa)
-        Pf = np.dot(M, np.dot(Pa, M.T)) * (1.0 + self.inflation)
+        M = self.tangent_liner_model(xa)  # J * J
+        Pf = np.dot(M, np.dot(Pa, M.T)) * (1.0 + self.inflation)  # J * J
 
-        # K = np.dot(Pf, np.linalg.inv(Pf + R))
-        K = np.linalg.solve((Pf + R).T, Pf.T).T
+        Hj = self.H_jacobian(xf)  # N * J
 
-        xa_next = xf + np.dot(K, yo - xf)
-        Pa_next = np.dot(np.identity(self.J) - K, Pf)
+        A = np.dot(Hj, np.dot(Pf, Hj.T)) + R  # N * N
+        K = np.dot(Pf, np.dot(Hj.T, np.linalg.inv(A)))  # J * N
+
+        xa_next = xf + np.dot(K, self.H(yo - xf))  # J * 1
+        Pa_next = np.dot(np.identity(self.J) - np.dot(K, Hj), Pf)  # J * J
 
         return xa_next, Pa_next
 
@@ -60,38 +77,62 @@ class data_assimilation:
         f_tr.close()
         f_ob.close()
 
-    def B(self, yo, R, sample_size):
+    def calc_B(self, xa):
         res = np.zeros((self.J, self.J))
-        for i in np.arange(sample_size):
-            if i % 100 == 0:
-                print i
-            idx = np.random.randint(len(yo) - 10)
-            x48 = np.array(yo[idx - 200])
-            x24 = np.array(yo[idx - 200])
-            Pa_48 = 9.0 * np.identity(self.J)
-            Pa_24 = 9.0 * np.identity(self.J)
-
+        for i in np.arange(len(xa) - 8):
+            x48 = np.array(xa[i])
+            x24 = np.array(xa[i + 4])
             for j in np.arange(8):
-                x48, Pa_48 = self.kalman_filter(x48, Pa_48, yo[idx + 1 + j], R)
-
+                x48 = self.time_evolution(x48)
             for j in np.arange(4):
-                x24, Pa_24 = self.kalman_filter(x24, Pa_24, yo[idx + 5 + j], R)
-
+                x24 = self.time_evolution(x24)
             dx = x48 - x24
             res += np.dot(np.array([dx]).T, dx.reshape(1, self.J))
-        res /= sample_size
+        res /= len(xa) - 8
         return res
 
-    def threeD_var(self, xa, yo, K):
-        xf = self.time_evolution(xa)
+    def threeD_var(self, xa, yo, B):
+        xf = self.time_evolution(xa)  # J * 1
 
-        M = self.tangent_liner_model(xa)
+        M = self.tangent_liner_model(xa)  # J * J
 
-        # K = np.dot(B, np.linalg.inv(B + R))
+        Hj = self.H_jacobian(xf)  # N * J
 
-        xa_next = xf + np.dot(K, yo - xf)
+        A = np.dot(Hj, np.dot(B, Hj.T)) + R  # N * N
+        K = np.dot(B, np.dot(Hj.T, np.linalg.inv(A)))  # J * N
+
+        xa_next = xf + np.dot(K, self.H(yo - xf))  # J * 1
 
         return xa_next
+
+    def xa_with_kalman_filter(self, yt, yo, R):
+        xa_0 = np.array(yt[100])
+        Pa_0 = 9.0 * np.identity(self.J)
+
+        xa = [xa_0]
+        Pa = [Pa_0]
+
+        for i in np.arange(len(yt) - 1):
+            if i % 100 == 0:
+                print "kalman filter step: " + str(i)
+            xa_next, Pa_next = self.kalman_filter(xa[i], Pa[i], yo[i + 1], R)
+            xa.append(xa_next)
+            Pa.append(Pa_next)
+
+        return xa
+
+    def xa_with_threeD_bar(self, yt, yo, B):
+        xa_0 = np.array(yt[100])
+
+        xa = [xa_0]
+
+        for i in np.arange(len(yt) - 1):
+            if i % 100 == 0:
+                print "threeD var step: " + str(i)
+            xa_next = self.threeD_var(xa[i], yo[i + 1], B)
+            xa.append(xa_next)
+
+        return xa
 
 
 def lorenz96(x):
@@ -114,87 +155,95 @@ def RMSE(xo, xt):
     return np.linalg.norm(xo - xt) / np.sqrt(J)
 
 
-def estimate(J, yt, yo, inflation, delta=1e-5):
-    da = data_assimilation(lorenz96, J=J, delta=delta, inflation=inflation)
+def find_optimal_inflation(yt, yo, mask):
+    candidates = []
 
-    R = np.identity(J)
-    xa_0 = np.array(yt[100])
-    Pa_0 = 9.0 * np.identity(J)
+    for inflation in np.arange(0.0, 0.1, 0.01):
+        print "inflation: " + str(inflation)
+        da = data_assimilation(f=lorenz96, inflation=inflation, mask=mask)
+        R = np.identity(da.N)
+        xa = da.xa_with_kalman_filter(yt, yo, R)
+        xa_RMSE = [RMSE(xa[i], yt[i]) for i in np.arange(len(yt))]
+        candidates.append((inflation, np.average(xa_RMSE)))
 
-    xa = [xa_0]
-    Pa = [Pa_0]
+    res = min(candidates, key=(lambda x: x[1]))[0]
+    print res
+    return res
 
-    L = len(yt)
-    for i in np.arange(L - 1):
-        xa_next, Pa_next = da.kalman_filter(xa[i], Pa[i], yo[i + 1], R)
-        xa.append(xa_next)
-        Pa.append(Pa_next)
-        if i % 100 == 0:
-            print i
 
-    xa_RMSE = [RMSE(xa[i], yt[i]) for i in np.arange(L)]
-    """
-    plt.xlabel('time')
-    plt.ylabel('x[0]')
-    plt.title('x[0] (no multicative inflation)')
+def find_optimal_B(yt, yo, B0, mask):
+    candidates = []
 
-    plt.plot([xa[i][0] for i in np.arange(500)], label='xa')
-    plt.plot([yt[i][0] for i in np.arange(500)], label='truth')
-    plt.legend()
+    for a in np.arange(0.1, 2.0, 0.1):
+        print "background covariance matrix coefficient: " + str(a)
+        da = data_assimilation(f=lorenz96, inflation=inflation, mask=mask)
+        xa = da.xa_with_threeD_bar(yt, yo, B0 * a)
+        xa_RMSE = [RMSE(xa[i], yt[i]) for i in np.arange(len(yt))]
+        candidates.append((a, np.average(xa_RMSE)))
+
+    res = min(candidates, key=(lambda x: x[1]))[0]
+    print res
+    return res
+
+
+def main():
+    yt = np.loadtxt('truth.txt')
+    yo = np.loadtxt('observation.txt')
+
+    inflation = 0.05
+    N = 20
+    mask = np.ones(40)
+    for i in np.arange(N):
+        mask[2 * i] = 0
+    R = np.identity(N)
+
+    da = data_assimilation(f=lorenz96, inflation=inflation, mask=mask)
+
+    xa_kf = da.xa_with_kalman_filter(yt, yo, R)
+    fname = "analysis_" + str(N) + '.txt'
+    f_an = open(fname, 'w')
+    for e in xa_kf:
+        f_an.write(" ".join(map(str, e)) + '\n')
+    f_an.close()
+    print "create " + fname
+
+    # xa_kf = np.loadtxt(fname)
+
+    B0 = da.calc_B(xa_kf)
+    print "calculate background covariance matrix"
+    plt.pcolormesh(B0)
+    plt.colorbar()
+
+    # xa = da.xa_with_threeD_bar(yt, yo, B0)
+    # xa_RMSE = [RMSE(xa[i], yt[i]) for i in np.arange(len(yt))]
+
     plt.show()
-    """
-    return xa_RMSE
-
-
-def threeD_var_test(J, yt, yo, inflation, sample_size):
-    da = data_assimilation(lorenz96, J=J, inflation=inflation)
-
-    R = np.identity(J)
-    xa_0 = np.array(yt[100])
-
-    xa = [xa_0]
-
-    B = da.B(yo, R, sample_size)
-    K = np.linalg.solve((B + R).T, B.T).T
-
-    L = len(yt)
-    for i in np.arange(L - 1):
-        xa_next = da.threeD_var(xa[i], yo[i + 1], K)
-        xa.append(xa_next)
-        if i % 100 == 0:
-            print i
-    xa_RMSE = [RMSE(xa[i], yt[i]) for i in np.arange(L)]
-    return xa_RMSE
 
 
 if __name__ == '__main__':
-    f_tr = open('truth.txt', 'r')
-    f_ob = open('observation.txt', 'r')
+    yt = np.loadtxt('truth.txt')
+    yo = np.loadtxt('observation.txt')
 
-    yt = []
-    yo = []
+    mask = np.ones(40)
+    mask[0] = 0
+    mask[20] = 0
 
-    for line in f_tr:
-        yt.append(np.array(map(float, line.split())))
-    for line in f_ob:
-        yo.append(np.array(map(float, line.split())))
+    # inflation = find_optimal_inflation(yt, yo, mask)
+    inflation = 0.07
 
-    xa_RMSE = estimate(40, yt, yo, 0.02)
+    da = data_assimilation(f=lorenz96, inflation=inflation, mask=mask)
 
-    plt.xlabel('time')
-    plt.ylabel('RMSE')
-    plt.yscale('log')
+    R = np.identity(da.N)
 
-    plt.plot(xa_RMSE)
-    plt.show()
+    xa_kf = da.xa_with_kalman_filter(yt, yo, R)
+    fname = 'analysis.txt'
+    f_an = open(fname, 'w')
+    for e in xa_kf:
+        f_an.write(" ".join(map(str, e)) + '\n')
+    f_an.close()
+    print "create " + fname
 
-    """
-    inflation = 0.05
-    for sample_size in [100, 400, 1400]:
-        xa_RMSE = threeD_var_test(40, yt, yo, inflation, sample_size)
-        plt.plot(xa_RMSE, label='sample size = ' + str(sample_size))
+    # xa_kf = np.loadtxt(fname)
 
-    plt.legend()
-    plt.show()
-    # threeD_var_test(40, yt, yo, 0.05)
-    """
+    B0 = da.calc_B(xa_kf)
+    a = find_optimal_B(yt, yo, B0, mask)
