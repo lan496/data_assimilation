@@ -65,8 +65,8 @@ class data_assimilation:
         for i in np.arange(spinup_step):
             x0 = self.time_evolution(x0)
 
-        f_tr = open('truth.txt', 'w')
-        f_ob = open('observation.txt', 'w')
+        f_tr = open('truth_04.txt', 'w')
+        f_ob = open('observation_04.txt', 'w')
 
         observe_step = spinup_step
         for i in np.arange(observe_step):
@@ -91,7 +91,7 @@ class data_assimilation:
         res /= len(xa) - 8
         return res
 
-    def threeD_var(self, xa, yo, B):
+    def threeD_var(self, xa, yo, B, R):
         xf = self.time_evolution(xa)  # J * 1
 
         M = self.tangent_liner_model(xa)  # J * J
@@ -113,23 +113,19 @@ class data_assimilation:
         Pa = [Pa_0]
 
         for i in np.arange(len(yt) - 1):
-            if i % 100 == 0:
-                print "kalman filter step: " + str(i)
             xa_next, Pa_next = self.kalman_filter(xa[i], Pa[i], yo[i + 1], R)
             xa.append(xa_next)
             Pa.append(Pa_next)
 
         return xa
 
-    def xa_with_threeD_bar(self, yt, yo, B):
+    def xa_with_threeD_bar(self, yt, yo, B, R):
         xa_0 = np.array(yt[100])
 
         xa = [xa_0]
 
         for i in np.arange(len(yt) - 1):
-            if i % 100 == 0:
-                print "threeD var step: " + str(i)
-            xa_next = self.threeD_var(xa[i], yo[i + 1], B)
+            xa_next = self.threeD_var(xa[i], yo[i + 1], B, R)
             xa.append(xa_next)
 
         return xa
@@ -166,84 +162,64 @@ def find_optimal_inflation(yt, yo, mask):
         xa_RMSE = [RMSE(xa[i], yt[i]) for i in np.arange(len(yt))]
         candidates.append((inflation, np.average(xa_RMSE)))
 
-    res = min(candidates, key=(lambda x: x[1]))[0]
+    res = min(candidates, key=(lambda x: x[1]))
     print res
     return res
 
 
-def find_optimal_B(yt, yo, B0, mask):
+def find_optimal_B(yt, yo, B0, R, da):
     candidates = []
 
     for a in np.arange(0.1, 2.0, 0.1):
         print "background covariance matrix coefficient: " + str(a)
-        da = data_assimilation(f=lorenz96, inflation=inflation, mask=mask)
-        xa = da.xa_with_threeD_bar(yt, yo, B0 * a)
+        xa = da.xa_with_threeD_bar(yt, yo, B0 * a, R)
         xa_RMSE = [RMSE(xa[i], yt[i]) for i in np.arange(len(yt))]
         candidates.append((a, np.average(xa_RMSE)))
 
-    res = min(candidates, key=(lambda x: x[1]))[0]
+    res = min(candidates, key=(lambda x: x[1]))
     print res
     return res
 
 
-def main():
-    yt = np.loadtxt('truth.txt')
-    yo = np.loadtxt('observation.txt')
+def random_mask(yt, yo, N):
+    tmp = np.random.choice(np.arange(40), N, replace=False)
+    mask = np.zeros(40)
+    for e in tmp:
+        mask[e] = 1
+    inflation, kf_RMSE = find_optimal_inflation(yt, yo, mask)
+    # inflation, kf_RMSE = 0.07, 0.2
 
-    inflation = 0.05
-    N = 20
-    mask = np.ones(40)
-    for i in np.arange(N):
-        mask[2 * i] = 0
+    da = data_assimilation(f=lorenz96, inflation=inflation, mask=mask)
+
     R = np.identity(N)
 
-    da = data_assimilation(f=lorenz96, inflation=inflation, mask=mask)
-
     xa_kf = da.xa_with_kalman_filter(yt, yo, R)
-    fname = "analysis_" + str(N) + '.txt'
-    f_an = open(fname, 'w')
-    for e in xa_kf:
-        f_an.write(" ".join(map(str, e)) + '\n')
-    f_an.close()
-    print "create " + fname
-
-    # xa_kf = np.loadtxt(fname)
 
     B0 = da.calc_B(xa_kf)
-    print "calculate background covariance matrix"
-    plt.pcolormesh(B0)
-    plt.colorbar()
+    b, kf_3Dbar = find_optimal_B(yt, yo, B0, R, da)
 
-    # xa = da.xa_with_threeD_bar(yt, yo, B0)
-    # xa_RMSE = [RMSE(xa[i], yt[i]) for i in np.arange(len(yt))]
+    return kf_RMSE, kf_3Dbar, inflation, B0, b, mask
 
-    plt.show()
 
+def main():
+    yt = np.loadtxt('truth_04.txt')
+    yo = np.loadtxt('observation_04.txt')
+
+    for N in np.arange(40, 20, -1):
+        try:
+            res = random_mask(yt, yo, N)
+        except:
+            continue
+        else:
+            print res
+            f = open('test_04.txt', 'a')
+            s = "{0}: {1} {2}\n".format(str(N), str(res[0]), str(res[1]))
+            f.write(s)
+            f.close()
 
 if __name__ == '__main__':
-    yt = np.loadtxt('truth.txt')
-    yo = np.loadtxt('observation.txt')
-
-    mask = np.ones(40)
-    mask[0] = 0
-    mask[20] = 0
-
-    # inflation = find_optimal_inflation(yt, yo, mask)
-    inflation = 0.07
-
-    da = data_assimilation(f=lorenz96, inflation=inflation, mask=mask)
-
-    R = np.identity(da.N)
-
-    xa_kf = da.xa_with_kalman_filter(yt, yo, R)
-    fname = 'analysis.txt'
-    f_an = open(fname, 'w')
-    for e in xa_kf:
-        f_an.write(" ".join(map(str, e)) + '\n')
-    f_an.close()
-    print "create " + fname
-
-    # xa_kf = np.loadtxt(fname)
-
-    B0 = da.calc_B(xa_kf)
-    a = find_optimal_B(yt, yo, B0, mask)
+    # yt = np.loadtxt('truth.txt')
+    # yo = np.loadtxt('observation.txt')
+    da = data_assimilation(lorenz96, inflation=0.0)
+    da.create_data()
+    main()
